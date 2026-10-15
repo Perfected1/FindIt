@@ -160,3 +160,51 @@ def send_email(to, subject, text):
     except (smtplib.SMTPException, OSError):
         app.logger.exception("Could not send email to %s", to)
         return False
+
+@app.route("/api/items", methods=["GET"])
+def list_items():
+    """Open items only: a matched item leaves the feed."""
+    q = request.args.get("q", "").strip()
+    name = request.args.get("item", "").strip()
+    date_from = request.args.get("date_from", "").strip()
+    date_to = request.args.get("date_to", "").strip()
+
+    sql, params = "SELECT * FROM items WHERE status = 'open'", []
+    if q:
+        sql += " AND (title LIKE ? OR description LIKE ? OR location LIKE ?)"
+        params += [f"%{q}%"] * 3
+    if name:
+        sql += " AND title LIKE ?"
+        params.append(f"%{name}%")
+    if date_from:
+        sql += " AND found_on >= ?"
+        params.append(date_from)
+    if date_to:
+        sql += " AND found_on <= ?"
+        params.append(date_to)
+
+    rows = get_db().execute(sql + " ORDER BY id DESC", params).fetchall()
+    return jsonify([public_item(r) for r in rows])
+
+
+@app.route("/api/items", methods=["POST"])
+def create_item():
+    """JSON: title, description, email, email_confirm (required);
+    category, location, found_on 'YYYY-MM-DD' (optional; category defaults to 'Other',
+    found_on to today and can't be in the future)."""
+    data = body()
+    title = field(data, "title", "Item name", 100)
+    description = field(data, "description", "Description", 2000)
+    category = field(data, "category", "Category", 50, required=False) or "Other"
+    location = field(data, "location", "Location", 200, required=False)
+    email = email_field(data)
+    found_on = date_field(data, "found_on", "Date found") or date.today().isoformat()
+
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO items (title, description, category, location, found_on, email, review_token) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (title, description, category, location, found_on, email, secrets.token_urlsafe(24)))
+    db.commit()
+    row = db.execute("SELECT * FROM items WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(public_item(row)), 201
