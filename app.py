@@ -265,3 +265,168 @@ Keep this link private: anyone who has it can see the claims.
         db.commit()
         return jsonify({"error": "We couldn't deliver your claim. Please try again later."}), 502
     return jsonify({"message": "Your claim was emailed to the person who found the item."}), 201
+
+
+
+
+
+# ---------- Claims ----------
+
+@app.route("/api/items/<int:item_id>/claims", methods=["POST"])
+def create_claim(item_id):
+    """JSON: description, email, email_confirm (required);
+    details, phone, lost_where, lost_on 'YYYY-MM-DD' (optional).
+    The claim goes to the reporter's mailbox. Nothing here lets anyone read it."""
+    db = get_db()
+    item = db.execute("SELECT * FROM items WHERE id = ? AND status = 'open'", (item_id,)).fetchone()
+    if item is None:
+        return jsonify({"error": "This item is not available to claim"}), 404
+
+    data = body()
+    description = field(data, "description", "Description", 2000)
+    details = field(data, "details", "Identifying details", 2000, required=False)
+    lost_where = field(data, "lost_where", "Where it was lost", 200, required=False)
+    lost_on = date_field(data, "lost_on", "Date lost")
+    email = email_field(data)
+    phone = field(data, "phone", "Phone", 30, required=False)
+
+    cur = db.execute(
+        "INSERT INTO claims (item_id, description, details, lost_where, lost_on, email, phone) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (item_id, description, details, lost_where, lost_on, email, phone))
+    db.commit()
+
+    lost_note = " (note: that is after the day you found it)" if lost_on and lost_on > item["found_on"] else ""
+    sent = send_email(item["email"], f"Claim on your found item {reference(item_id)}: {item['title']}", f"""\
+Someone says this is theirs: {reference(item_id)} - {item['title']}
+
+THE ITEM YOU REPORTED
+{item['description']}
+Category: {item['category']}
+Found: {item['found_on']} {item['location']}
+
+THEIR DESCRIPTION
+{description}
+
+IDENTIFYING DETAILS THEY GAVE
+{details or 'none given'}
+
+LOST: {lost_on or 'date not given'}, {lost_where or 'place not given'}{lost_note}
+
+THEIR CONTACT
+Email: {email}
+Phone: {phone or 'not given'}
+
+Compare their description with the item, then mark it as a match or not here
+(all claims on this item are listed on that page):
+{BASE_URL}/review/{item['review_token']}
+
+Keep this link private: anyone who has it can see the claims.
+""")
+    if not sent:  # don't keep a claim the reporter never received
+        db.execute("DELETE FROM claims WHERE id = ?", (cur.lastrowid,))
+        db.commit()
+        return jsonify({"error": "We couldn't deliver your claim. Please try again later."}), 502
+    return jsonify({"message": "Your claim was emailed to the person who found the item."}), 201
+
+
+# ---------- Reporter review (private link from the email) ----------
+
+REVIEW_PAGE = """<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claims for {{ ref }}</title>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:640px;margin:1.5rem auto;padding:0 1rem}
+ .box{border:1px solid #8884;border-radius:8px;padding:.75rem 1rem;margin:.75rem 0;white-space:pre-wrap}
+ .note{background:#8882;border-radius:8px;padding:.75rem 1rem}
+ button{padding:.5rem 1rem;margin-right:.5rem}
+</style>
+<h1>{{ item.title }} ({{ ref }})</h1>
+<div class="box">{{ item.description }}
+Category: {{ item.category }}
+Found: {{ item.found_on }} {{ item.location }}</div>
+{% if item.status == 'returned' %}<p class="note">Match confirmed. This item is no longer in the feed. Reach out to the claimant below.</p>{% endif %}
+{% if error %}<p class="note">{{ error }}</p>{% endif %}
+<h2>Claims ({{ claims|length }})</h2>
+{% for c in claims %}
+<div class="box"><b>{{ {'match': 'Match', 'no_match': 'Not a match'}.get(c.status, 'Awaiting your review') }}</b>
+{{ c.description }}
+Identifying details: {{ c.details or 'none given' }}
+Lost: {{ c.lost_on or 'date not given' }}, {{ c.lost_where or 'place not given' }}{% if c.lost_on and c.lost_on > item.found_on %} (note: after the day it was found){% endif %}
+{% if c.status != 'no_match' %}Email: {{ c.email }}{% if c.phone %} / Phone: {{ c.phone }}{% endif %}{% endif %}</div>
+{% if c.status == 'pending' and item.status == 'open' %}
+<form method="post" action="{{ url_for('review_decide', token=token, claim_id=c.id) }}">
+ <button name="decision" value="match">This is a match</button>
+ <button name="decision" value="no_match">Not a match</button>
+</form>
+{% endif %}
+{% else %}<p>No claims yet.</p>{% endfor %}"""
+
+
+def item_by_token(token):
+    item = get_db().execute("SELECT * FROM items WHERE review_token = ?", (token,)).fetchone()
+    return item or abort(404)
+
+
+def review_response(token, error=None, status=200):
+    db = get_db()
+    item = item_by_token(token)
+    claims = db.execute("SELECT * FROM claims WHERE item_id = ? ORDER BY id", (item["id"],)).fetchall()
+    page = render_template_string(REVIEW_PAGE, item=item, claims=claims, token=token,
+                                  ref=reference(item["id"]), error=error)
+    return page, status
+
+
+@app.after_request
+def allow_frontend(resp):
+    """CORS: the React front end is served from a different origin than this API."""
+    if request.path.startswith("/api/") and request.headers.get("Origin") in ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = request.headers["Origin"]
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Vary"] = "Origin"
+    return resp
+
+
+@app.after_request
+def keep_token_private(resp):
+    if request.path.startswith("/review/"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
+
+
+@app.route("/review/<token>")
+def review_page(token):
+    return review_response(token)
+
+
+@app.route("/review/<token>/claims/<int:claim_id>", methods=["POST"])
+def review_decide(token, claim_id):
+    decision = request.form.get("decision")
+    if decision not in ("match", "no_match"):
+        abort(400, "Choose match or not a match")
+    db = get_db()
+    item_id = item_by_token(token)["id"]
+    # Atomic: only one claim can win, and only while the item is still open.
+    ok = decision == "no_match" or db.execute(
+        "UPDATE items SET status = 'returned' WHERE id = ? AND status = 'open'", (item_id,)).rowcount
+    ok = ok and db.execute(
+        "UPDATE claims SET status = ? WHERE id = ? AND item_id = ? AND status = 'pending'",
+        (decision, claim_id, item_id)).rowcount
+    if not ok:
+        db.rollback()
+        return review_response(token, "That claim was already reviewed, or a match is already confirmed.", 409)
+    db.commit()
+    return redirect(url_for("review_page", token=token), code=303)
+
+
+
+with sqlite3.connect(DATABASE) as _db:
+    _db.executescript(SCHEMA)
+    if "category" not in [row[1] for row in _db.execute("PRAGMA table_info(items)")]:
+        # database created before categories existed
+        _db.execute("ALTER TABLE items ADD COLUMN category TEXT NOT NULL DEFAULT 'Other'")
+
+if __name__ == "__main__":
+    app.run(port=int(os.environ.get("PORT", "5000")), debug=os.environ.get("FLASK_DEBUG") == "1")
