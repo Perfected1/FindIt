@@ -15,7 +15,7 @@ from flask import (Flask, abort, g, jsonify, redirect, render_template_string,
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024
 
-DATABASE = os.environ.get("FINDIT_DB", "findit.db")
+DATABASE = os.environ.get("FINDIT_DB", "/tmp/findit.db" if os.environ.get("VERCEL") else "findit.db")
 BASE_URL = os.environ.get("FINDIT_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
 SMTP_HOST = os.environ.get("SMTP_HOST")
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY")  # sends over HTTPS; use where SMTP ports are blocked
