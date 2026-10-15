@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: findit-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
+    disk:
+      name: findit-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: FINDIT_DB
+        value: /data/findit.db
+      - key: FINDIT_BASE_URL
+        value: https://findit-api.onrender.com
+      - key: FINDIT_ALLOWED_ORIGINS
+        value: https://findit-rosy.vercel.app
+      - key: MAIL_FROM
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
