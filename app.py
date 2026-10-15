@@ -208,3 +208,60 @@ def create_item():
     db.commit()
     row = db.execute("SELECT * FROM items WHERE id = ?", (cur.lastrowid,)).fetchone()
     return jsonify(public_item(row)), 201
+
+@app.route("/api/items/<int:item_id>/claims", methods=["POST"])
+def create_claim(item_id):
+    """JSON: description, email, email_confirm (required);
+    details, phone, lost_where, lost_on 'YYYY-MM-DD' (optional).
+    The claim goes to the reporter's mailbox. Nothing here lets anyone read it."""
+    db = get_db()
+    item = db.execute("SELECT * FROM items WHERE id = ? AND status = 'open'", (item_id,)).fetchone()
+    if item is None:
+        return jsonify({"error": "This item is not available to claim"}), 404
+
+    data = body()
+    description = field(data, "description", "Description", 2000)
+    details = field(data, "details", "Identifying details", 2000, required=False)
+    lost_where = field(data, "lost_where", "Where it was lost", 200, required=False)
+    lost_on = date_field(data, "lost_on", "Date lost")
+    email = email_field(data)
+    phone = field(data, "phone", "Phone", 30, required=False)
+
+    cur = db.execute(
+        "INSERT INTO claims (item_id, description, details, lost_where, lost_on, email, phone) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (item_id, description, details, lost_where, lost_on, email, phone))
+    db.commit()
+
+    lost_note = " (note: that is after the day you found it)" if lost_on and lost_on > item["found_on"] else ""
+    sent = send_email(item["email"], f"Claim on your found item {reference(item_id)}: {item['title']}", f"""\
+Someone says this is theirs: {reference(item_id)} - {item['title']}
+
+THE ITEM YOU REPORTED
+{item['description']}
+Category: {item['category']}
+Found: {item['found_on']} {item['location']}
+
+THEIR DESCRIPTION
+{description}
+
+IDENTIFYING DETAILS THEY GAVE
+{details or 'none given'}
+
+LOST: {lost_on or 'date not given'}, {lost_where or 'place not given'}{lost_note}
+
+THEIR CONTACT
+Email: {email}
+Phone: {phone or 'not given'}
+
+Compare their description with the item, then mark it as a match or not here
+(all claims on this item are listed on that page):
+{BASE_URL}/review/{item['review_token']}
+
+Keep this link private: anyone who has it can see the claims.
+""")
+    if not sent:  # don't keep a claim the reporter never received
+        db.execute("DELETE FROM claims WHERE id = ?", (cur.lastrowid,))
+        db.commit()
+        return jsonify({"error": "We couldn't deliver your claim. Please try again later."}), 502
+    return jsonify({"message": "Your claim was emailed to the person who found the item."}), 201
